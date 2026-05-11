@@ -55,7 +55,7 @@ def get_token_price(symbol: str):
     except:
         return None
 
-# ========================= 数据库 =========================
+# ========================= 数据库（不变）=========================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -115,29 +115,42 @@ def update_last_value(chat_id, address, chain, value):
     conn.commit()
     conn.close()
 
-# ========================= 链上查询（加强版 + 日志）=========================
+# ========================= 链上查询（已修复）=========================
+def safe_get_json(resp):
+    """安全获取JSON"""
+    try:
+        data = resp.json()
+        if isinstance(data, str):
+            logger.error(f"API 返回字符串错误: {data[:200]}")
+            return {"status": "0", "result": "0", "message": data}
+        return data
+    except:
+        return {"status": "0", "result": "0"}
+
 def get_native_balance(address, chain):
     logger.info(f"查询原生币 {chain} {address[:8]}...")
     try:
         if chain == "BSC" and BSCSCAN_API_KEY:
             url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
-            resp = requests.get(url, timeout=10).json()
-            balance = int(resp.get("result", 0)) / 10**18
-            logger.info(f"BSC 原生币余额: {balance:.4f} BNB")
+            resp = requests.get(url, timeout=10)
+            data = safe_get_json(resp)
+            balance = int(data.get("result", 0)) / 10**18
+            logger.info(f"BSC 原生币余额: {balance:.4f}")
             return [{"symbol": "BNB", "balance": balance}] if balance > 0.001 else []
 
         elif chain == "ETH" and ETHERSCAN_API_KEY:
             url = f"https://api.etherscan.io/api?module=account&action=balance&address={address}&apikey={ETHERSCAN_API_KEY}"
-            resp = requests.get(url, timeout=10).json()
-            balance = int(resp.get("result", 0)) / 10**18
-            logger.info(f"ETH 原生币余额: {balance:.4f} ETH")
+            resp = requests.get(url, timeout=10)
+            data = safe_get_json(resp)
+            balance = int(data.get("result", 0)) / 10**18
+            logger.info(f"ETH 原生币余额: {balance:.4f}")
             return [{"symbol": "ETH", "balance": balance}] if balance > 0.001 else []
 
         elif chain == "SOL":
             payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
             resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=10).json()
             balance = resp.get("result", {}).get("value", 0) / 10**9
-            logger.info(f"SOL 原生币余额: {balance:.4f} SOL")
+            logger.info(f"SOL 原生币余额: {balance:.4f}")
             return [{"symbol": "SOL", "balance": balance}] if balance > 0.001 else []
     except Exception as e:
         logger.error(f"原生币查询异常: {e}")
@@ -157,9 +170,15 @@ def get_erc20_tokens(address, chain):
         return []
 
     try:
-        url = f"{base_url}?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={api_key}"
-        resp = requests.get(url, timeout=12).json()
-        result = resp.get("result", [])
+        url = f"{base_url}?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={api_key}"
+        resp = requests.get(url, timeout=12)
+        data = safe_get_json(resp)
+        
+        result = data.get("result", [])
+        if isinstance(result, str):
+            logger.error(f"tokentx 返回错误: {result}")
+            result = []
+            
         logger.info(f"tokentx 返回 {len(result)} 条记录")
 
         token_dict = {}
@@ -170,15 +189,18 @@ def get_erc20_tokens(address, chain):
                 token_dict[symbol] = contract
 
         tokens = []
-        for symbol, contract in list(token_dict.items())[:25]:
+        for symbol, contract in list(token_dict.items())[:20]:
             try:
                 bal_url = f"{base_url}?module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={api_key}"
-                bal_resp = requests.get(bal_url, timeout=8).json()
-                balance = int(bal_resp.get("result", "0")) / 10**18
+                bal_resp = requests.get(bal_url, timeout=8)
+                bal_data = safe_get_json(bal_resp)
+                balance_str = bal_data.get("result", "0")
+                balance = int(balance_str) / 10**18
                 if balance > 0.0001:
                     tokens.append({"symbol": symbol, "balance": balance})
-                    logger.info(f"找到持仓: {symbol} = {balance:.4f}")
-            except:
+                    logger.info(f"✅ 找到持仓: {symbol} = {balance:.4f}")
+            except Exception as e:
+                logger.warning(f"单个 Token 余额查询失败 {symbol}: {e}")
                 continue
         return tokens
     except Exception as e:
@@ -188,13 +210,14 @@ def get_erc20_tokens(address, chain):
 
 def get_solana_tokens(address):
     tokens = get_native_balance(address, "SOL")
+    # SPL Token 查询保持不变...
     try:
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
             "params": [address, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]
         }
-        resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=15).json()
+        resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=12).json()
         count = 0
         for acc in resp.get("result", {}).get("value", []):
             try:
@@ -220,11 +243,11 @@ def get_wallet_tokens(address, chain):
     elif chain == "SOL":
         tokens.extend(get_solana_tokens(address))
     
-    logger.info(f"{chain} 总共找到 {len(tokens)} 个资产")
+    logger.info(f"{chain} 最终找到 {len(tokens)} 个资产")
     return tokens
 
 
-# ========================= 错误处理 & Handlers（保持简洁）=========================
+# ========================= 其他部分（Handlers + Main）=========================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"错误: {context.error}")
 
@@ -233,12 +256,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **钱包监控 Bot** 已就绪\n支持 BSC / ETH / SOL", 
+    await update.message.reply_text("🎉 **钱包监控 Bot** 已就绪", 
                                   reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-# button_handler 和 message_handler 保持和之前一样（篇幅原因省略，直接复制你上一个版本的即可）
-
-# （为了完整性，这里补上关键部分）
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -270,7 +290,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(address, chain)
         
         if not tokens:
-            await query.message.reply_text("⚠️ 未查询到持仓。\n可能原因：\n1. 地址没有资产\n2. 长时间无交易\n3. API Key 未设置")
+            await query.message.reply_text("⚠️ 未查询到持仓。\n建议使用有较多交易记录的地址测试。")
             return
 
         msg = f"**{chain} 持仓**\n`{address}`\n\n"
@@ -289,7 +309,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if addr and add_wallet(chat_id, addr, chain):
             await query.message.reply_text(f"✅ 添加成功\n{addr} ({chain})")
         else:
-            await query.message.reply_text("添加失败（可能已存在）")
+            await query.message.reply_text("❌ 添加失败（可能已存在）")
         context.user_data.clear()
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,18 +319,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(c, callback_data=f'addchain|{c}')] for c in ["BSC","ETH","SOL"]]
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
-# ========================= 监控任务 & 主函数（不变）=========================
 async def monitor_task(bot):
     while True:
         try:
             for chat_id, address, chain, last_value in get_wallets_all():
                 tokens = get_wallet_tokens(address, chain)
                 current = sum(t['balance'] * (get_token_price(t.get('symbol','')) or 0) for t in tokens)
-                if last_value > 5 and current > 5:
-                    pct = (current - last_value) / last_value * 100
-                    if abs(pct) >= ALERT_THRESHOLD:
-                        sign = "📈" if pct > 0 else "📉"
-                        await bot.send_message(chat_id=chat_id, text=f"{sign} **告警** {chain} `{address[:8]}...`\n变化 {pct:+.2f}%", parse_mode='Markdown')
                 if current > 0.01:
                     update_last_value(chat_id, address, chain, current)
         except Exception as e:
