@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "database.db"
 ALERT_THRESHOLD = 10
-MONITOR_INTERVAL = 60   # 提高间隔，减少 API 调用频率
+MONITOR_INTERVAL = 120   # 提高间隔，减少 API 调用频率
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
