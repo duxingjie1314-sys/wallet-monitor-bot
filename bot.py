@@ -213,4 +213,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding_wallet':
         address = update.message.text
         context.user_data['pending_address'] = address
-        keyboard =
+        keyboard = [
+            [InlineKeyboardButton("BSC", callback_data='addchain|BSC')],
+            [InlineKeyboardButton("ETH", callback_data='addchain|ETH')],
+            [InlineKeyboardButton("SOL", callback_data='addchain|SOL')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("请选择该地址的链：", reply_markup=reply_markup)
+        context.user_data['action'] = 'choosing_chain'
+
+async def add_chain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data.startswith("addchain|"):
+        chain = query.data.split("|")[1]
+        chat_id = query.message.chat.id
+        address = context.user_data.get('pending_address')
+        if address:
+            add_wallet(chat_id, address, chain)
+            await query.message.reply_text(f"已添加钱包 {address} 到链 {chain}")
+            context.user_data.clear()
