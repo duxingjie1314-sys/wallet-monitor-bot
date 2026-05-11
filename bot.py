@@ -223,4 +223,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding_wallet':
         address = update.message.text
-        context.user_data['pending
+        context.user_data['pending_address'] = address
+        keyboard = [
+            [InlineKeyboardButton("BSC", callback_data='BSC')],
+            [InlineKeyboardButton("ETH", callback_data='ETH')],
+            [InlineKeyboardButton("SOL", callback_data='SOL')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("请选择该地址的链：", reply_markup=reply_markup)
+        context.user_data['action'] = 'choosing_chain'
+
+    elif context.user_data.get('action') == 'choosing_chain':
+        chain = update.message.text.upper()
+        address = context.user_data.get('pending_address')
+        add_wallet(update.message.chat.id, address, chain)
+        await update.message.reply_text(f"✅ 添加成功: {address} ({chain})")
+        context.user_data['action'] = None
+
+# ---------------------------
+# 主函数
+async def main():
+    init_db()
+    load_coingecko_coins()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+    asyncio.create_task(monitor())
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
