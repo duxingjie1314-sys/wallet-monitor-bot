@@ -166,7 +166,7 @@ def get_wallet_tokens(address, chain):
         return []
 
 # ---------------------------
-# Telegram Bot
+# Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("添加钱包地址", callback_data='add_wallet')],
@@ -203,7 +203,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         address = context.user_data.get('selected_address')
         tokens = get_wallet_tokens(address, chain)
         msg = f"钱包: {address}\n链: {chain}\n\n持仓代币:\n"
-        unknown_tokens = []
         for t in tokens:
             price, _ = get_token_price(t['symbol'])
             price_display = f"${price:.4f}" if price else "未知"
@@ -214,52 +213,4 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding_wallet':
         address = update.message.text
         context.user_data['pending_address'] = address
-        keyboard = [
-            [InlineKeyboardButton("BSC", callback_data='BSC')],
-            [InlineKeyboardButton("ETH", callback_data='ETH')],
-            [InlineKeyboardButton("SOL", callback_data='SOL')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("请选择该地址的链：", reply_markup=reply_markup)
-        context.user_data['action'] = 'choosing_chain'
-
-# ---------------------------
-# 异步监控任务
-async def monitor():
-    while True:
-        wallets = get_wallets_all()
-        for chat_id, address, chain, last_value in wallets:
-            tokens = get_wallet_tokens(address, chain)
-            total_value = 0
-            for t in tokens:
-                price, _ = get_token_price(t['symbol'])
-                if price:
-                    total_value += t['balance'] * price
-            if last_value > 0:
-                change = ((total_value - last_value) / last_value) * 100
-                if abs(change) >= ALERT_THRESHOLD:
-                    try:
-                        msg = f"钱包 {address} 在 {chain} 链上市值变化: {change:.2f}%\n总市值: ${total_value:.2f}"
-                        app = context_app  # global application
-                        await app.bot.send_message(chat_id=chat_id, text=msg)
-                    except Exception as e:
-                        print("发送消息失败:", e)
-            update_last_value(chat_id, address, chain, total_value)
-        await asyncio.sleep(MONITOR_INTERVAL)
-
-# ---------------------------
-# 主函数
-async def main():
-    global context_app
-    init_db()
-    load_coingecko_coins()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    context_app = app
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-    asyncio.create_task(monitor())
-    await app.run_polling()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        keyboard =
