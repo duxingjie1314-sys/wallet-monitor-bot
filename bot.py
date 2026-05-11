@@ -223,3 +223,4 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding_wallet':
         address = update.message.text
+        context.user_data['pending
