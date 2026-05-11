@@ -21,8 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DB_FILE = "database.db"
-ALERT_THRESHOLD = 10        # 价格变化告警阈值（百分比）
-MONITOR_INTERVAL = 45       # 监控间隔（秒）
+ALERT_THRESHOLD = 10
+MONITOR_INTERVAL = 45
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
@@ -34,21 +34,14 @@ COINGECKO_COINS = {}
 # ========================= CoinGecko =========================
 def load_coingecko_coins():
     global COINGECKO_COINS
-    for attempt in range(3):
-        try:
-            resp = requests.get(
-                "https://api.coingecko.com/api/v3/coins/list",
-                timeout=15
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                COINGECKO_COINS = {coin['symbol'].lower(): coin['id'] for coin in data}
-                logger.info(f"✅ 成功加载 {len(COINGECKO_COINS)} 个币种")
-                return
-        except Exception as e:
-            logger.warning(f"CoinGecko 加载失败 (尝试 {attempt+1}/3): {e}")
-            asyncio.sleep(2)
-    logger.error("❌ CoinGecko 最终加载失败")
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/coins/list", timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            COINGECKO_COINS = {coin['symbol'].lower(): coin['id'] for coin in data}
+            logger.info(f"✅ 成功加载 {len(COINGECKO_COINS)} 个币种")
+    except Exception as e:
+        logger.error(f"CoinGecko 加载失败: {e}")
 
 def get_token_price(symbol: str):
     if not symbol or not COINGECKO_COINS:
@@ -59,7 +52,7 @@ def get_token_price(symbol: str):
     try:
         resp = requests.get(
             f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd",
-            timeout=10
+            timeout=8
         ).json()
         return resp.get(coin_id, {}).get("usd")
     except:
@@ -97,17 +90,13 @@ def get_user_wallets(chat_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT DISTINCT address FROM wallets WHERE chat_id=?", (chat_id,))
-    result = [row[0] for row in c.fetchall()]
-    conn.close()
-    return result
+    return [row[0] for row in c.fetchall()]
 
 def get_address_chains(chat_id, address):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT chain FROM wallets WHERE chat_id=? AND address=?", (chat_id, address))
-    result = [row[0] for row in c.fetchall()]
-    conn.close()
-    return result
+    return [row[0] for row in c.fetchall()]
 
 def get_wallets_all():
     conn = sqlite3.connect(DB_FILE)
@@ -120,101 +109,82 @@ def get_wallets_all():
 def update_last_value(chat_id, address, chain, value):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""UPDATE wallets SET last_value=? 
-                 WHERE chat_id=? AND address=? AND chain=?""", 
+    c.execute("UPDATE wallets SET last_value=? WHERE chat_id=? AND address=? AND chain=?", 
               (value, chat_id, address, chain))
     conn.commit()
     conn.close()
 
-# ========================= 链上查询 =========================
+# ========================= 链上查询（简化版）=========================
 def get_erc20_tokens(address, chain):
     if chain == "BSC":
-        api_key = BSCSCAN_API_KEY
         base_url = "https://api.bscscan.com/api"
+        api_key = BSCSCAN_API_KEY
     elif chain == "ETH":
-        api_key = ETHERSCAN_API_KEY
         base_url = "https://api.etherscan.io/api"
+        api_key = ETHERSCAN_API_KEY
     else:
         return []
-
     if not api_key:
         return []
 
     try:
-        url = f"{base_url}?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={api_key}"
+        url = f"{base_url}?module=account&action=tokentx&address={address}&page=1&offset=80&sort=desc&apikey={api_key}"
         resp = requests.get(url, timeout=10).json()
-        
         tokens = {}
         for tx in resp.get("result", []):
-            symbol = tx.get("tokenSymbol")
-            contract = tx.get("contractAddress")
-            if symbol and contract:
-                tokens[symbol] = contract
+            if tx.get("tokenSymbol"):
+                tokens[tx["tokenSymbol"]] = tx["contractAddress"]
 
         balances = []
-        for symbol, contract in list(tokens.items())[:25]:
-            bal_url = f"{base_url}?module=account&action=tokenbalance&contractaddress={contract}&address={address}&tag=latest&apikey={api_key}"
-            bal_resp = requests.get(bal_url, timeout=8).json()
+        for symbol, contract in list(tokens.items())[:20]:
             try:
-                balance = int(bal_resp.get("result", "0")) / 10**18
+                bal_url = f"{base_url}?module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={api_key}"
+                bal = requests.get(bal_url, timeout=8).json().get("result", "0")
+                balance = int(bal) / 10**18
                 if balance > 0.0001:
                     balances.append({"symbol": symbol, "balance": balance})
             except:
                 continue
         return balances
-    except Exception as e:
-        logger.error(f"ERC20 查询失败 {chain}: {e}")
+    except:
         return []
 
 def get_solana_tokens(address):
     try:
-        headers = {"Content-Type": "application/json"}
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
-            "params": [
-                address,
-                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                {"encoding": "jsonParsed"}
-            ]
+            "params": [address, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]
         }
-        resp = requests.post(SOLANA_RPC_URL, json=payload, headers=headers, timeout=12).json()
-        
+        resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=12).json()
         tokens = []
-        for account in resp.get("result", {}).get("value", []):
+        for acc in resp.get("result", {}).get("value", []):
             try:
-                info = account["account"]["data"]["parsed"]["info"]
-                amount = int(info["tokenAmount"]["amount"])
-                decimals = int(info["tokenAmount"]["decimals"])
-                balance = amount / (10 ** decimals)
+                info = acc["account"]["data"]["parsed"]["info"]
+                balance = int(info["tokenAmount"]["amount"]) / (10 ** int(info["tokenAmount"]["decimals"]))
                 if balance > 0.0001:
                     tokens.append({"symbol": "Token", "balance": balance})
             except:
                 continue
         return tokens
-    except Exception as e:
-        logger.error(f"SOL 查询失败: {e}")
+    except:
         return []
 
 def get_wallet_tokens(address, chain):
-    chain = chain.upper()
     if chain in ["BSC", "ETH"]:
         return get_erc20_tokens(address, chain)
     elif chain == "SOL":
         return get_solana_tokens(address)
     return []
 
-# ========================= Telegram Handlers =========================
+# ========================= Handlers =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
-        [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
+        [InlineKeyboardButton("👀 查看钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text(
-        "🎉 **欢迎使用钱包监控 Bot**\n支持 BSC • ETH • SOL", 
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("🎉 **钱包监控 Bot 已启动**\n支持 BSC / ETH / SOL", 
+                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -224,38 +194,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'add_wallet':
         context.user_data['action'] = 'adding'
-        await query.message.reply_text("请发送钱包地址：")
+        await query.message.reply_text("📍 请发送钱包地址：")
 
     elif data == 'view_wallet':
-        addresses = get_user_wallets(chat_id)
-        if not addresses:
-            await query.message.reply_text("你还没有添加任何钱包。")
+        addrs = get_user_wallets(chat_id)
+        if not addrs:
+            await query.message.reply_text("暂无钱包")
             return
-        keyboard = [[InlineKeyboardButton(addr[:12] + "...", callback_data=f"addr|{addr}")] for addr in addresses]
-        await query.message.reply_text("选择地址查看持仓：", reply_markup=InlineKeyboardMarkup(keyboard))
+        kb = [[InlineKeyboardButton(a[:12]+"...", callback_data=f"addr|{a}")] for a in addrs]
+        await query.message.reply_text("选择地址：", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("addr|"):
-        address = data.split("|")[1]
-        context.user_data['selected_address'] = address
-        chains = get_address_chains(chat_id, address)
-        keyboard = [[InlineKeyboardButton(chain, callback_data=f"chain|{chain}")] for chain in chains]
-        await query.message.reply_text(f"地址：`{address}`\n请选择链：", 
-                                     reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        addr = data.split("|")[1]
+        context.user_data['selected'] = addr
+        chains = get_address_chains(chat_id, addr)
+        kb = [[InlineKeyboardButton(c, callback_data=f"chain|{c}")] for c in chains]
+        await query.message.reply_text(f"地址: `{addr}`\n选择链：", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("chain|"):
         chain = data.split("|")[1]
-        address = context.user_data.get('selected_address')
-        tokens = get_wallet_tokens(address, chain)
-        
+        addr = context.user_data.get('selected')
+        tokens = get_wallet_tokens(addr, chain)
         if not tokens:
-            await query.message.reply_text("未查询到持仓或查询失败。")
+            await query.message.reply_text("未查询到持仓")
             return
-
-        msg = f"**{chain} 持仓**\n`{address}`\n\n"
+        msg = f"**{chain} 持仓**\n`{addr}`\n\n"
         total = 0
-        for t in tokens[:15]:
-            price = get_token_price(t['symbol'])
-            usd = t['balance'] * (price or 0)
+        for t in tokens[:12]:
+            p = get_token_price(t["symbol"])
+            usd = t["balance"] * (p or 0)
             total += usd
             msg += f"{t['symbol']}: {t['balance']:.4f} ≈ ${usd:.2f}\n"
         msg += f"\n**总价值 ≈ ${total:.2f}**"
@@ -263,56 +230,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("addchain|"):
         chain = data.split("|")[1]
-        address = context.user_data.get('pending_address')
-        if address and add_wallet(chat_id, address, chain):
-            await query.message.reply_text(f"✅ 已成功添加\n{address} ({chain})")
+        addr = context.user_data.get('pending')
+        if addr and add_wallet(chat_id, addr, chain):
+            await query.message.reply_text(f"✅ 添加成功\n{addr} ({chain})")
         else:
-            await query.message.reply_text("❌ 添加失败（可能已存在）")
+            await query.message.reply_text("添加失败（可能已存在）")
         context.user_data.clear()
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
     if context.user_data.get('action') == 'adding':
-        context.user_data['pending_address'] = text
-        context.user_data['action'] = 'choosing_chain'
-        keyboard = [
+        context.user_data['pending'] = update.message.text.strip()
+        context.user_data['action'] = 'choosing'
+        kb = [
             [InlineKeyboardButton("BSC", callback_data='addchain|BSC')],
             [InlineKeyboardButton("ETH", callback_data='addchain|ETH')],
             [InlineKeyboardButton("SOL", callback_data='addchain|SOL')]
         ]
-        await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
 # ========================= 监控任务 =========================
 async def monitor_task(bot):
     while True:
         try:
-            wallets = get_wallets_all()
-            for chat_id, address, chain, last_value in wallets:
+            for chat_id, address, chain, last_value in get_wallets_all():
                 tokens = get_wallet_tokens(address, chain)
-                current_value = sum(t['balance'] * (get_token_price(t.get('symbol', '')) or 0) for t in tokens)
+                current = sum(t['balance'] * (get_token_price(t.get('symbol','')) or 0) for t in tokens)
 
-                if last_value > 0 and current_value > 0:
-                    change_pct = (current_value - last_value) / last_value * 100
-                    if abs(change_pct) >= ALERT_THRESHOLD:
-                        sign = "📈" if change_pct > 0 else "📉"
+                if last_value > 5 and current > 5:
+                    pct = (current - last_value) / last_value * 100
+                    if abs(pct) >= ALERT_THRESHOLD:
+                        sign = "📈" if pct > 0 else "📉"
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"{sign} **价格告警**\n{chain} `{address[:8]}...`\n"
-                                 f"变化: {change_pct:+.2f}%\n"
-                                 f"当前价值 ≈ ${current_value:.2f}",
+                            text=f"{sign} **告警** {chain} `{address[:8]}...`\n变化 {pct:+.2f}%\n当前 ≈ ${current:.2f}",
                             parse_mode='Markdown'
                         )
-                if current_value > 0.01:
-                    update_last_value(chat_id, address, chain, current_value)
+                if current > 0.01:
+                    update_last_value(chat_id, address, chain, current)
         except Exception as e:
-            logger.error(f"监控任务出错: {e}")
-        
+            logger.error(f"监控错误: {e}")
         await asyncio.sleep(MONITOR_INTERVAL)
 
-# ========================= 主函数 =========================
+# ========================= 主启动（关键修改）=========================
 async def main():
     if not BOT_TOKEN:
-        logger.error("❌ 请设置 BOT_TOKEN 环境变量")
+        logger.error("缺少 BOT_TOKEN")
         return
 
     load_coingecko_coins()
@@ -324,11 +286,12 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # 启动后台监控
+    # 启动监控
     asyncio.create_task(monitor_task(app.bot))
 
-    logger.info("🚀 钱包监控 Bot 已启动")
+    logger.info("🚀 Bot 启动成功，正在运行...")
     await app.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # 直接运行 async main，避免 asyncio.run 冲突
+    asyncio.get_event_loop().run_until_complete(main())
