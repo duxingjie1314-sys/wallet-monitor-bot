@@ -7,25 +7,15 @@ from typing import List, Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ====================== 配置 ======================
 DB_FILE = "database.db"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY") or os.environ.get("BSCSCAN_API_KEY")
+MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY")
 
 COINGECKO_COINS = {}
-
-BASE_URL = "https://api.etherscan.io/v2/api"
-
-CHAIN_CONFIG = {
-    "BSC": {"chainid": 56, "symbol": "BNB"},
-    "ETH": {"chainid": 1,  "symbol": "ETH"},
-}
 
 # ====================== CoinGecko ======================
 def load_coingecko_coins():
@@ -35,8 +25,8 @@ def load_coingecko_coins():
         if r.status_code == 200:
             COINGECKO_COINS = {coin['symbol'].lower(): coin['id'] for coin in r.json()}
             logger.info(f"✅ CoinGecko 加载 {len(COINGECKO_COINS)} 个币种")
-    except Exception as e:
-        logger.warning(f"CoinGecko 加载失败: {e}")
+    except:
+        pass
 
 def get_token_price(symbol: str) -> float | None:
     if not symbol or not COINGECKO_COINS:
@@ -89,75 +79,43 @@ def get_address_chains(chat_id: int, address: str):
     return result or ["BSC"]
 
 
-# ====================== 区块链查询 ======================
-def etherscan_request(params: dict):
-    if not ETHERSCAN_API_KEY:
-        raise Exception("未设置 ETHERSCAN_API_KEY")
-    params["apikey"] = ETHERSCAN_API_KEY
-    r = httpx.get(BASE_URL, params=params, timeout=20)
-    data = r.json()
-    if isinstance(data, dict) and data.get("status") == "0":
-        error_msg = data.get('result', '')
-        if "Free API access is not supported" in error_msg:
-            raise Exception("FREE_API_LIMIT")
-        raise Exception(f"API错误: {error_msg}")
-    return data
-
-
+# ====================== Moralis 查询持仓 ======================
 def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
-    logger.info(f"查询 {chain} 地址: {address}")
-    tokens = []
-    config = CHAIN_CONFIG.get(chain.upper())
-    if not config:
-        return tokens
+    if not MORALIS_API_KEY:
+        logger.warning("未配置 MORALIS_API_KEY")
+        return []
 
-    # 原生代币
+    chain_map = {"BSC": "bsc", "ETH": "eth"}
+    moralis_chain = chain_map.get(chain.upper())
+    if not moralis_chain:
+        return []
+
     try:
-        data = etherscan_request({
-            "chainid": config["chainid"], "module": "account", "action": "balance",
-            "address": address, "tag": "latest"
-        })
-        balance = int(data.get("result", 0)) / 10**18
-        if balance > 0.0001:
-            tokens.append({"symbol": config["symbol"], "balance": balance})
-    except:
-        pass
+        url = f"https://deep-index.moralis.io/api/v2.2/{address}/erc20?chain={moralis_chain}"
+        headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
+        
+        r = httpx.get(url, headers=headers, timeout=20)
+        if r.status_code != 200:
+            logger.error(f"Moralis 错误 {r.status_code}: {r.text[:200]}")
+            return []
 
-    # ERC20 代币
-    try:
-        data = etherscan_request({
-            "chainid": config["chainid"], "module": "account", "action": "tokentx",
-            "address": address, "page": 1, "offset": 80, "sort": "desc"
-        })
-        result = data.get("result", []) if isinstance(data, dict) else []
-
-        token_dict = {}
-        for tx in result:
-            if isinstance(tx, dict):
-                symbol = tx.get("tokenSymbol")
-                contract = tx.get("contractAddress")
-                decimal = int(tx.get("tokenDecimal", 18))
-                if symbol and contract and symbol not in token_dict:
-                    token_dict[symbol] = (contract, decimal)
-
-        for symbol, (contract, decimal) in list(token_dict.items())[:20]:
+        data = r.json()
+        tokens = []
+        for item in data:
             try:
-                bal = etherscan_request({
-                    "chainid": config["chainid"], "module": "account", "action": "tokenbalance",
-                    "contractaddress": contract, "address": address, "tag": "latest"
-                })
-                balance = int(bal.get("result", 0)) / (10 ** decimal)
+                balance = int(item.get("balance", 0)) / (10 ** int(item.get("decimals", 18)))
                 if balance > 0.0001:
-                    tokens.append({"symbol": symbol, "balance": balance})
+                    tokens.append({
+                        "symbol": item.get("symbol", "UNKNOWN"),
+                        "balance": balance
+                    })
             except:
                 continue
+        logger.info(f"Moralis 查询成功，找到 {len(tokens)} 个代币")
+        return tokens
     except Exception as e:
-        if "FREE_API_LIMIT" in str(e):
-            logger.warning("免费 API 额度不足")
-        else:
-            logger.error(f"查询失败: {e}")
-
-    return tokens
+        logger.error(f"Moralis 查询异常: {e}")
+        return []
 
 
 # ====================== Handlers ======================
@@ -166,7 +124,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **Wallet Monitor Bot** 已启动\n支持 BSC & ETH", 
+    await update.message.reply_text("🎉 **Wallet Monitor Bot** 已启动\n使用 Moralis 查询持仓", 
                                   reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 
@@ -206,12 +164,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
         
         if not tokens:
-            await query.message.reply_text("⚠️ 未检测到持仓\n\n可能原因：\n1. 该地址近期无交易\n2. API 免费额度限制\n3. 持仓极少")
+            await query.message.reply_text("⚠️ 该地址暂无 ERC20 持仓")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
         total = 0.0
-        for t in tokens[:15]:
+        for t in tokens[:20]:
             price = get_token_price(t['symbol'])
             usd = t['balance'] * (price or 0)
             total += usd
@@ -257,7 +215,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Bot 已成功启动（完整版）")
+    logger.info("🚀 Bot 已成功启动（Moralis 版）")
     application.run_polling(drop_pending_updates=True)
 
 
