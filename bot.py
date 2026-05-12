@@ -65,9 +65,7 @@ async def get_token_price(symbol: str) -> float | None:
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
-                    chat_id INTEGER, 
-                    address TEXT, 
-                    chain TEXT,
+                    chat_id INTEGER, address TEXT, chain TEXT,
                     UNIQUE(chat_id, address, chain))""")
     conn.commit()
     conn.close()
@@ -79,7 +77,8 @@ def add_wallet(chat_id: int, address: str, chain: str) -> bool:
                      (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
-    except:
+    except Exception as e:
+        logger.error(f"添加钱包失败: {e}")
         return False
     finally:
         conn.close()
@@ -130,7 +129,7 @@ async def get_native_balance(address: str, chain: str = "BSC") -> List[Dict]:
         balance = int(data.get("result", 0)) / 10**18
         return [{"symbol": config["symbol"], "balance": balance}] if balance > 0.001 else []
     except Exception as e:
-        logger.error(f"原生余额失败 {chain}: {e}")
+        logger.error(f"原生余额失败: {e}")
         return []
 
 
@@ -186,11 +185,9 @@ async def get_erc20_tokens(address: str, chain: str = "BSC") -> List[Dict]:
 
 
 async def get_wallet_tokens(address: str, chain: str):
-    logger.info(f"查询 {chain} 地址: {address}")
     tokens = await get_native_balance(address, chain)
     if chain.upper() in ["BSC", "ETH"]:
         tokens.extend(await get_erc20_tokens(address, chain))
-    logger.info(f"发现 {len(tokens)} 个资产")
     return tokens
 
 
@@ -200,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **钱包监控 Bot** 已启动", 
+    await update.message.reply_text("🎉 **Wallet Monitor Bot** 已启动", 
                                   reply_markup=InlineKeyboardMarkup(kb), 
                                   parse_mode='Markdown')
 
@@ -221,7 +218,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("暂无保存的钱包")
             return
         kb = [[InlineKeyboardButton(a[:12]+"...", callback_data=f"addr|{a}")] for a in addrs]
-        await query.message.reply_text("选择地址查看持仓：", reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.reply_text("选择地址：", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("addr|"):
         addr = data.split("|")[1]
@@ -237,7 +234,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = await get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 未检测到持仓（可能地址新或无近期交易）")
+            await query.message.reply_text("⚠️ 未检测到持仓")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
@@ -275,7 +272,7 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Bot 已成功启动（异步版本）")
+    logger.info("🚀 Bot 已成功启动")
     await application.run_polling(drop_pending_updates=True)
 
 
