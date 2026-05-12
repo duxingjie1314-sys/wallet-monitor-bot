@@ -55,7 +55,7 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== 查询（适配免费 Key） ======================
+# ====================== 极简查询（适合免费 Key） ======================
 def get_wallet_tokens(address, chain):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
@@ -65,11 +65,10 @@ def get_wallet_tokens(address, chain):
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=10).json()
         bnb = int(data.get("result", 0)) / 10**18
-        if bnb > 0.001:
+        if bnb > 0.0001:
             tokens.append({"symbol": "BNB", "balance": bnb})
-            logger.info(f"✅ BNB: {bnb:.4f}")
 
-        # Token (只通过交易记录发现)
+        # 只通过交易记录发现 Token
         url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         result = data.get("result", [])
@@ -127,11 +126,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 未查询到持仓\n建议换一个最近活跃的地址")
+            await query.message.reply_text("未查询到资产")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
-        for t in tokens[:20]:
+        for t in tokens[:25]:
             msg += f"{t['symbol']}\n"
         msg += f"\n共发现 {len(tokens)} 个资产"
         await query.message.reply_text(msg, parse_mode='Markdown')
