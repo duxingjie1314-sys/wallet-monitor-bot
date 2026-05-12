@@ -12,17 +12,13 @@ from telegram.ext import (
     filters
 )
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DB_FILE = "database.db"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
 
-# ====================== 初始化 ======================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
@@ -59,22 +55,22 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== 查询 ======================
+# ====================== V2 接口查询 ======================
 def get_wallet_tokens(address, chain):
-    if chain != "BSC":
+    if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
     tokens = []
     try:
-        # 查询 BNB
-        url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
+        # V2 - 原生币 BNB
+        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=10).json()
-        bnb_balance = int(data.get("result", 0)) / 10**18
-        if bnb_balance > 0.001:
-            tokens.append({"symbol": "BNB", "balance": bnb_balance})
-            logger.info(f"找到 BNB: {bnb_balance:.4f}")
+        bnb = int(data.get("result", 0)) / 10**18
+        if bnb > 0.001:
+            tokens.append({"symbol": "BNB", "balance": bnb})
+            logger.info(f"✅ BNB: {bnb:.4f}")
 
-        # 查询 Token
-        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
+        # V2 - Token 交易记录
+        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx&address={address}&page=1&offset=80&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         result = data.get("result", [])
         logger.info(f"tokentx 返回 {len(result)} 条记录")
@@ -87,9 +83,9 @@ def get_wallet_tokens(address, chain):
                 if symbol and contract:
                     token_dict[symbol] = contract
 
-        for symbol, contract in list(token_dict.items())[:25]:
+        for symbol, contract in list(token_dict.items())[:20]:
             try:
-                bal_url = f"https://api.bscscan.com/api?module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={BSCSCAN_API_KEY}"
+                bal_url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={BSCSCAN_API_KEY}"
                 bal_data = requests.get(bal_url, timeout=8).json()
                 balance = int(bal_data.get("result", 0)) / 10**18
                 if balance > 0.0001:
@@ -124,17 +120,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == 'view_wallet':
         addrs = get_user_wallets(chat_id)
         if not addrs:
-            await query.message.reply_text("你还没有添加钱包")
+            await query.message.reply_text("暂无钱包")
             return
         kb = [[InlineKeyboardButton(a[:12]+"...", callback_data=f"addr|{a}")] for a in addrs]
-        await query.message.reply_text("选择地址查看持仓：", reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.reply_text("选择地址：", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("addr|"):
         addr = data.split("|")[1]
         context.user_data['selected'] = addr
         chains = get_address_chains(chat_id, addr)
         kb = [[InlineKeyboardButton(c, callback_data=f"chain|{c}")] for c in chains]
-        await query.message.reply_text(f"地址：`{addr}`\n请选择链：", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await query.message.reply_text(f"地址：`{addr}`\n选择链：", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("chain|"):
         chain = data.split("|")[1]
@@ -142,7 +138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 未查询到持仓\n请使用**有 BNB** 的 BSC 地址测试")
+            await query.message.reply_text("⚠️ 未查询到持仓\n请使用有 BNB 的活跃 BSC 地址")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
@@ -157,7 +153,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if addr and add_wallet(chat_id, addr, chain):
             await query.message.reply_text(f"✅ 添加成功\n{addr} ({chain})")
         else:
-            await query.message.reply_text("❌ 添加失败（可能已存在）")
+            await query.message.reply_text("❌ 添加失败")
         context.user_data.clear()
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,9 +167,6 @@ def main():
     if not BOT_TOKEN:
         logger.error("缺少 BOT_TOKEN")
         return
-    if not BSCSCAN_API_KEY:
-        logger.warning("⚠️ 未设置 BSCSCAN_API_KEY")
-
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
