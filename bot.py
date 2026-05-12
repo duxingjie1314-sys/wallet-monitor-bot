@@ -20,12 +20,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DB_FILE = "database.db"
+MONITOR_INTERVAL = 90
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
+ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY")
 
 COINGECKO_COINS = {}
 
+# ====================== CoinGecko ======================
 def load_coingecko_coins():
     global COINGECKO_COINS
     try:
@@ -33,8 +36,8 @@ def load_coingecko_coins():
         if r.status_code == 200:
             COINGECKO_COINS = {coin['symbol'].lower(): coin['id'] for coin in r.json()}
             logger.info(f"✅ CoinGecko 加载 {len(COINGECKO_COINS)} 个币种")
-    except:
-        logger.warning("CoinGecko 加载失败")
+    except Exception as e:
+        logger.warning(f"CoinGecko 加载失败: {e}")
 
 def get_token_price(symbol: str):
     if not symbol or not COINGECKO_COINS:
@@ -85,13 +88,12 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== V2 接口查询 ======================
+# ====================== 查询函数 ======================
 def get_native_balance(address, chain):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
     try:
-        # 使用 V2 接口
-        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
+        url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=10).json()
         balance = int(data.get("result", 0)) / 10**18
         logger.info(f"BNB 余额: {balance:.4f}")
@@ -100,16 +102,14 @@ def get_native_balance(address, chain):
         logger.error(f"BNB 查询失败: {e}")
         return []
 
-
 def get_erc20_tokens(address):
     logger.info("查询 Token 持仓...")
     tokens = []
     try:
-        # 使用 V2 tokentx
-        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
+        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         result = data.get("result", [])
-        logger.info(f"tokentx 返回 {len(result)} 条记录")
+        logger.info(f"tokentx 返回 {len(result)} 条")
 
         token_dict = {}
         for tx in result:
@@ -121,7 +121,7 @@ def get_erc20_tokens(address):
 
         for symbol, contract in list(token_dict.items())[:25]:
             try:
-                bal_url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={BSCSCAN_API_KEY}"
+                bal_url = f"https://api.bscscan.com/api?module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={BSCSCAN_API_KEY}"
                 bal_data = requests.get(bal_url, timeout=8).json()
                 balance = int(bal_data.get("result", 0)) / 10**18
                 if balance > 0.0001:
@@ -134,14 +134,12 @@ def get_erc20_tokens(address):
         logger.error(f"Token 查询失败: {e}")
         return []
 
-
 def get_wallet_tokens(address, chain):
     tokens = get_native_balance(address, chain)
     if chain == "BSC":
         tokens.extend(get_erc20_tokens(address))
     logger.info(f"最终找到 {len(tokens)} 个资产")
     return tokens
-
 
 # ====================== Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,7 +180,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 未查询到持仓\n请确认地址有 BNB 和 Token")
+            await query.message.reply_text("⚠️ 未查询到持仓\n\n请使用**有 BNB** 的 BSC 地址测试")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
@@ -208,19 +206,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding':
         context.user_data['pending_address'] = update.message.text.strip()
         context.user_data['action'] = 'choosing'
-        kb = [[InlineKeyboardButton(c, callback_data=f'addchain|{c}')] for c in ["BSC","ETH","SOL"]]
+        kb = [[InlineKeyboardButton(c, callback_data=f'addchain|{c}')] for c in ["BSC", "ETH", "SOL"]]
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
 def main():
     if not BOT_TOKEN:
         logger.error("缺少 BOT_TOKEN")
         return
+    if not BSCSCAN_API_KEY:
+        logger.warning("⚠️ 未设置 BSCSCAN_API_KEY，BSC 查询可能失败")
+
     load_coingecko_coins()
     init_db()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
     logger.info("🚀 Bot 已启动")
     app.run_polling()
 
