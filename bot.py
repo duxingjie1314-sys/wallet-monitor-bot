@@ -10,7 +10,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
-from apscheduler.schedulers.background import BackgroundScheduler  # ← 改用这个
+from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 DB_FILE = "database.db"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
+
+application = None  # 全局变量，用于发送通知
 
 # ====================== 数据库 ======================
 def init_db():
@@ -58,7 +60,7 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== DexScreener 获取价格 + 市值 ======================
+# ====================== DexScreener ======================
 def get_token_info(symbol: str):
     try:
         r = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={symbol}", timeout=10)
@@ -78,7 +80,7 @@ def get_token_info(symbol: str):
         pass
     return None
 
-# ====================== BSC 查询持仓 ======================
+# ====================== 获取钱包 Token ======================
 def get_wallet_tokens(address, chain="BSC"):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
@@ -104,7 +106,7 @@ def get_wallet_tokens(address, chain="BSC"):
         logger.error(f"查询出错: {e}")
     return tokens
 
-# ====================== 监控函数（非异步版本） ======================
+# ====================== 监控函数 ======================
 def monitor_prices():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -144,10 +146,9 @@ def monitor_prices():
                               f"地址: `{address[:8]}...{address[-6:]}`\n" \
                               f"时间: {datetime.now().strftime('%m-%d %H:%M')}"
 
-                        # 发送通知（使用 asyncio 创建新任务）
                         asyncio.create_task(send_notification(chat_id, msg))
 
-                # 保存
+                # 保存记录
                 c.execute("INSERT INTO price_history (chat_id, token, price, fdv, timestamp) VALUES (?,?,?,?,?)",
                          (chat_id, symbol, current_price, current_fdv, int(time.time())))
             conn.commit()
@@ -157,22 +158,21 @@ def monitor_prices():
     conn.close()
 
 async def send_notification(chat_id: int, message: str):
-    """异步发送消息"""
     try:
-        await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        if application and application.bot:
+            await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"发送通知失败: {e}")
 
-# ====================== Handlers ======================
+# ====================== Telegram Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **钱包监控 Bot** 已启动\n\n✅ 10% 市值异动自动播报已开启（每8分钟检查）", 
+    await update.message.reply_text("🎉 **钱包监控 Bot** 已启动\n\n✅ 10% 市值异动自动播报已开启（每8分钟）", 
                                   reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-# button_handler 和 message_handler（和你原来的一致）
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -182,6 +182,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'add_wallet':
         context.user_data['action'] = 'adding'
         await query.message.reply_text("请发送 BSC 地址：")
+
     elif data == 'view_wallet':
         addrs = get_user_wallets(chat_id)
         if not addrs:
@@ -189,18 +190,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         kb = [[InlineKeyboardButton(a[:12]+"...", callback_data=f"addr|{a}")] for a in addrs]
         await query.message.reply_text("选择地址：", reply_markup=InlineKeyboardMarkup(kb))
-    # ... 其他部分保持不变（为了长度我省略了，你可以保留你之前版本的完整 button_handler）
-    # 如果报错请告诉我，我再补全
 
-# （保持你之前提供的 button_handler 和 message_handler 完整代码）
+    elif data.startswith("addr|"):
+        addr = data.split("|")[1]
+        context.user_data['selected'] = addr
+        chains = get_address_chains(chat_id, addr)
+        kb = [[InlineKeyboardButton(c, callback_data=f"chain|{c}")] for c in chains]
+        await query.message.reply_text(f"地址：`{addr}`\n选择链：", 
+                                     reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    elif data.startswith("chain|"):
+        chain = data.split("|")[1]
+        addr = context.user_data.get('selected')
+        tokens = get_wallet_tokens(addr, chain)
+        if not tokens:
+            await query.message.reply_text("未查询到资产")
+            return
+        msg = f"**{chain} 持仓**\n`{addr}`\n\n"
+        for t in tokens[:25]:
+            msg += f"{t['symbol']}\n"
+        msg += f"\n共发现 {len(tokens)} 个资产"
+        await query.message.reply_text(msg, parse_mode='Markdown')
+
+    elif data.startswith("addchain|"):
+        chain = data.split("|")[1]
+        addr = context.user_data.get('pending_address')
+        if addr and add_wallet(chat_id, addr, chain):
+            await query.message.reply_text(f"✅ 添加成功\n{addr} ({chain})")
+        else:
+            await query.message.reply_text("❌ 添加失败")
+        context.user_data.clear()
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('action') == 'adding':
+        context.user_data['pending_address'] = update.message.text.strip()
+        context.user_data['action'] = 'choosing'
+        kb = [[InlineKeyboardButton("BSC", callback_data='addchain|BSC')]]
+        await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
 # ====================== 主程序 ======================
-application = None  # 全局变量用于发送消息
-
 def main():
     global application
     if not BOT_TOKEN or not BSCSCAN_API_KEY:
-        logger.error("缺少环境变量")
+        logger.error("缺少 BOT_TOKEN 或 BSCSCAN_API_KEY")
         return
 
     init_db()
@@ -210,7 +242,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # 启动 Background Scheduler
+    # 启动监控
     scheduler = BackgroundScheduler()
     scheduler.add_job(monitor_prices, 'interval', minutes=8)
     scheduler.start()
