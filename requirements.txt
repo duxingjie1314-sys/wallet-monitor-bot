@@ -1,3 +1,2 @@
-python-telegram-bot==20.*
+python-telegram-bot==20.8
 httpx
-requests  # 可暂时保留
