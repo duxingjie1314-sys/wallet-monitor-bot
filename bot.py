@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
 MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY")
 
-# ====================== DexScreener 市值查询 ======================
+# ====================== DexScreener 市值 ======================
 def get_market_cap(ca: str):
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{ca}"
@@ -48,11 +48,8 @@ def get_market_cap(ca: str):
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
-                    chat_id INTEGER, 
-                    address TEXT, 
-                    chain TEXT,
+                    chat_id INTEGER, address TEXT, chain TEXT,
                     UNIQUE(chat_id, address, chain))""")
-    
     conn.execute("""CREATE TABLE IF NOT EXISTS price_cache (
                     ca TEXT PRIMARY KEY, 
                     initial_mc REAL, 
@@ -68,8 +65,6 @@ def add_wallet(chat_id, address, chain):
                      (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
-    except:
-        return False
     finally:
         conn.close()
 
@@ -81,14 +76,13 @@ def get_user_wallets(chat_id):
     conn.close()
     return result
 
-# ====================== 持仓查询（BSC为主） ======================
+# ====================== 持仓查询 ======================
 def get_wallet_tokens(address, chain):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
     tokens = []
     try:
-        # 获取 Token 交易记录来发现持仓
-        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
+        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         seen = set()
         for tx in data.get("result", []):
@@ -101,7 +95,7 @@ def get_wallet_tokens(address, chain):
         logger.error(f"持仓查询异常: {e}")
     return tokens
 
-# ====================== 核心监控（每20秒） ======================
+# ====================== 核心监控 ======================
 def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -116,21 +110,18 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
                 ca = token.get("ca")
                 if not ca:
                     continue
-
                 info = get_market_cap(ca)
                 if not info or info["mc"] < 5000:
                     continue
 
                 current_mc = info["mc"]
-
-                # 查询缓存
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute("SELECT initial_mc FROM price_cache WHERE ca=?", (ca,))
                 row = c.fetchone()
                 conn.close()
 
-                if row is None:  # 首次发现
+                if row is None:
                     conn = sqlite3.connect(DB_FILE)
                     conn.execute("INSERT OR REPLACE INTO price_cache (ca, initial_mc, last_mc, last_time) VALUES (?,?,?,?)",
                                  (ca, current_mc, current_mc, int(time.time())))
@@ -149,43 +140,24 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
                               f"当前市值：**${current_mc:,.0f}**\n" \
                               f"CA：`{ca}`\n" \
                               f"链：{chain}\n" \
-                              f"地址：`{address[:8]}...{address[-6:]}`\n" \
-                              f"时间：{datetime.now().strftime('%H:%M:%S')}"
+                              f"地址：`{address[:8]}...`"
 
-                        # 异步发送消息
                         if context and context.application:
-                            asyncio.create_task(
-                                context.application.bot.send_message(
-                                    chat_id=chat_id, 
-                                    text=msg, 
-                                    parse_mode='Markdown'
-                                )
-                            )
-                        else:
-                            logger.info(f"【提醒】{chat_id} - {info['symbol']} +{total_increase:.1f}%")
-
-                # 更新最后市值
-                conn = sqlite3.connect(DB_FILE)
-                conn.execute("UPDATE price_cache SET last_mc=?, last_time=? WHERE ca=?",
-                             (current_mc, int(time.time()), ca))
-                conn.commit()
-                conn.close()
+                            asyncio.create_task(context.application.bot.send_message(
+                                chat_id=chat_id, text=msg, parse_mode='Markdown'
+                            ))
         except Exception as e:
-            logger.error(f"监控出错 {address}: {e}")
+            logger.error(f"监控出错: {e}")
 
-# ====================== Bot 交互 ======================
+# ====================== Bot 命令 ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加地址", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 我的地址", callback_data='view_wallets')]
     ]
     await update.message.reply_text(
-        "🚀 **链上持仓市值监控 Bot**\n\n"
-        "• 每20秒自动检测\n"
-        "• 以首次进入市值为基准\n"
-        "• 每涨10%推送提醒",
-        reply_markup=InlineKeyboardMarkup(kb), 
-        parse_mode='Markdown'
+        "🚀 **持仓市值监控 Bot**\n\n每20秒检测 • 每涨10%提醒", 
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,42 +180,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"• `{addr}` ({ch})\n"
         await query.message.reply_text(text, parse_mode='Markdown')
 
+    elif data.startswith('chain|'):
+        chain = data.split('|')[1]
+        addr = context.user_data.get('pending_address')
+        if addr and add_wallet(chat_id, addr, chain):
+            await query.message.reply_text(f"✅ 添加成功！\n链：{chain}\n地址：`{addr}`\n\n开始监控...", parse_mode='Markdown')
+            logger.info(f"用户 {chat_id} 添加了 {chain} 地址")
+        else:
+            await query.message.reply_text("❌ 添加失败")
+        context.user_data.clear()
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding':
         address = update.message.text.strip()
         context.user_data['pending_address'] = address
-        context.user_data['action'] = 'choosing_chain'
-        kb = [[InlineKeyboardButton("BSC", callback_data='chain|BSC')]]
-        await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
-
-async def chain_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chain = query.data.split("|")[1]
-    addr = context.user_data.get('pending_address')
-    if addr and add_wallet(query.message.chat.id, addr, chain):
-        await query.message.reply_text(f"✅ 添加成功！\n{chain} | `{addr}`", parse_mode='Markdown')
-    context.user_data.clear()
+        kb = [
+            [InlineKeyboardButton("BSC", callback_data='chain|BSC')],
+            [InlineKeyboardButton("ETH", callback_data='chain|ETH')],
+            [InlineKeyboardButton("SOL", callback_data='chain|SOL')]
+        ]
+        await update.message.reply_text(f"地址已接收：`{address}`\n请选择链：", 
+                                       reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 # ====================== 启动 ======================
 def main():
     if not BOT_TOKEN:
-        logger.error("缺少 BOT_TOKEN 环境变量")
+        logger.error("缺少 BOT_TOKEN")
         return
 
     init_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 启动定时任务
     scheduler = BackgroundScheduler()
     scheduler.add_job(monitor_prices, 'interval', seconds=20, args=[None])
     scheduler.start()
-    logger.info("✅ 市值监控任务已启动（每20秒）")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(CallbackQueryHandler(chain_callback, pattern="^chain\\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     logger.info("🚀 Bot 已启动")
