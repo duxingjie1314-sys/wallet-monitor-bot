@@ -1,3 +1,14 @@
-python-telegram-bot==20.3
-aiohttp==3.9.5
-requests==2.31.0
+# Telegram bot 核心
+python-telegram-bot[aio]~=20.3
+
+# 异步 HTTP 请求
+aiohttp>=3.9.0
+
+# 兼容旧版本 json / 数据解析
+yarl>=1.9.2
+multidict>=6.0.4
+
+# 日志处理（可选，但推荐）
+loguru>=0.7.0
+
+# Python 3.13 默认支持的标准库已经足够，不需要 requests
