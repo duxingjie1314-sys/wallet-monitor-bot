@@ -1,14 +1,15 @@
-# Telegram bot 核心
-python-telegram-bot[aio]~=20.3
+# Telegram Bot
+python-telegram-bot[asyncio]==20.6
 
 # 异步 HTTP 请求
-aiohttp>=3.9.0
+httpx==0.24.1
+aiohttp==3.9.5
 
-# 兼容旧版本 json / 数据解析
-yarl>=1.9.2
-multidict>=6.0.4
+# 环境变量管理
+python-dotenv==1.0.0
 
-# 日志处理（可选，但推荐）
-loguru>=0.7.0
+# 日志输出（标准库自带，不强制安装，但可选增强库）
+# loguru==0.7.2
 
-# Python 3.13 默认支持的标准库已经足够，不需要 requests
+# JSON 数据处理
+# 标准库自带 json 模块，不需要额外安装
