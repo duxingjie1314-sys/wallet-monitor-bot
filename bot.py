@@ -55,57 +55,46 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== V2 接口查询 ======================
+# ====================== 查询（适配免费 Key） ======================
 def get_wallet_tokens(address, chain):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
     tokens = []
     try:
-        # V2 - 原生币 BNB
-        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
+        # BNB
+        url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=10).json()
         bnb = int(data.get("result", 0)) / 10**18
         if bnb > 0.001:
             tokens.append({"symbol": "BNB", "balance": bnb})
             logger.info(f"✅ BNB: {bnb:.4f}")
 
-        # V2 - Token 交易记录
-        url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx&address={address}&page=1&offset=80&sort=desc&apikey={BSCSCAN_API_KEY}"
+        # Token (只通过交易记录发现)
+        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         result = data.get("result", [])
         logger.info(f"tokentx 返回 {len(result)} 条记录")
 
-        token_dict = {}
+        seen = set()
         for tx in result:
-            if isinstance(tx, dict):
-                symbol = tx.get("tokenSymbol")
-                contract = tx.get("contractAddress")
-                if symbol and contract:
-                    token_dict[symbol] = contract
-
-        for symbol, contract in list(token_dict.items())[:20]:
-            try:
-                bal_url = f"https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokenbalance&contractaddress={contract}&address={address}&apikey={BSCSCAN_API_KEY}"
-                bal_data = requests.get(bal_url, timeout=8).json()
-                balance = int(bal_data.get("result", 0)) / 10**18
-                if balance > 0.0001:
-                    tokens.append({"symbol": symbol, "balance": balance})
-                    logger.info(f"✅ 找到 {symbol} = {balance:.4f}")
-            except:
-                continue
+            symbol = tx.get("tokenSymbol")
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                tokens.append({"symbol": symbol, "balance": 0})
+                logger.info(f"发现 Token: {symbol}")
     except Exception as e:
         logger.error(f"查询异常: {e}")
     
-    logger.info(f"最终找到 {len(tokens)} 个资产")
+    logger.info(f"最终发现 {len(tokens)} 个资产")
     return tokens
 
-# ====================== Bot ======================
+# ====================== Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **钱包监控 Bot** 已就绪", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    await update.message.reply_text("🎉 **钱包监控 Bot**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -115,7 +104,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'add_wallet':
         context.user_data['action'] = 'adding'
-        await query.message.reply_text("请发送 BSC 钱包地址：")
+        await query.message.reply_text("请发送 BSC 地址：")
 
     elif data == 'view_wallet':
         addrs = get_user_wallets(chat_id)
@@ -138,13 +127,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 未查询到持仓\n请使用有 BNB 的活跃 BSC 地址")
+            await query.message.reply_text("⚠️ 未查询到持仓\n建议换一个最近活跃的地址")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
-        for t in tokens[:15]:
-            msg += f"{t['symbol']}: {t['balance']:.4f}\n"
-        msg += f"\n共找到 {len(tokens)} 个资产"
+        for t in tokens[:20]:
+            msg += f"{t['symbol']}\n"
+        msg += f"\n共发现 {len(tokens)} 个资产"
         await query.message.reply_text(msg, parse_mode='Markdown')
 
     elif data.startswith("addchain|"):
