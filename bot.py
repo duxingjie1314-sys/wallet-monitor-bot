@@ -83,28 +83,38 @@ def get_token_info(symbol: str):
 # ====================== 获取钱包 Token ======================
 def get_wallet_tokens(address, chain="BSC"):
     if chain != "BSC" or not BSCSCAN_API_KEY:
-        return []
+        return [{"symbol": "API_KEY_MISSING"}]
+    
     tokens = []
+    address = address.lower()
+    
     try:
-        # BNB 余额（加强错误处理）
+        # === 查询 BNB 余额 ===
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
-        data = requests.get(url, timeout=10).json()
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        
+        logger.info(f"BNB 查询结果: {data}")   # ← 打印日志方便调试
         
         result = data.get("result")
         if isinstance(result, str) and result.isdigit():
             bnb = int(result) / 10**18
-            if bnb > 0.0001:
+            if bnb > 0.00005:   # 降低阈值
                 tokens.append({"symbol": "BNB", "balance": bnb})
         else:
-            logger.warning(f"BNB 查询返回异常: {result}")
+            logger.warning(f"BNB 返回异常: {result}")
             
     except Exception as e:
-        logger.error(f"BNB 查询出错: {e}")
+        logger.error(f"BNB 查询异常: {e}")
 
     try:
-        # Token tx 发现
-        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
-        data = requests.get(url, timeout=12).json()
+        # === 通过交易记录发现 Token ===
+        url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
+        resp = requests.get(url, timeout=12)
+        data = resp.json()
+        
+        logger.info(f"TokenTx 返回状态: {data.get('status')} 结果数量: {len(data.get('result', []))}")
+        
         seen = set()
         for tx in data.get("result", []):
             symbol = tx.get("tokenSymbol")
@@ -112,8 +122,11 @@ def get_wallet_tokens(address, chain="BSC"):
                 seen.add(symbol)
                 tokens.append({"symbol": symbol, "balance": 0})
     except Exception as e:
-        logger.error(f"Token tx 查询出错: {e}")
-    
+        logger.error(f"TokenTx 查询异常: {e}")
+
+    if not tokens:
+        tokens.append({"symbol": "NO_ASSETS_FOUND"})
+        
     return tokens
 # ====================== 监控函数 ======================
 def monitor_prices():
