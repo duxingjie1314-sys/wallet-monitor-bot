@@ -1,15 +1,2 @@
-# Telegram Bot 库，异步模式
-python-telegram-bot[asyncio]==20.6
-
-# 异步 HTTP 客户端
-httpx>=0.25.0,<0.26.0
-aiohttp>=3.9.5,<4.0.0
-
-# 环境变量管理
-python-dotenv>=1.0.0,<2.0.0
-
-# 可选：日志更好看，如果你在 bot.py 用 logging 可以不必强制
-# rich>=13.0.0,<14.0.0
-
-# JSON 解析库，Python 自带，部署可选
-# ujson>=5.8.0,<6.0.0
+python-telegram-bot==21.4
+requests
