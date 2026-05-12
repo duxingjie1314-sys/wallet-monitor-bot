@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -55,9 +55,7 @@ async def get_token_price(symbol: str) -> float | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-            )
+            r = await client.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd")
             return r.json().get(coin_id, {}).get("usd")
     except:
         return None
@@ -67,16 +65,18 @@ async def get_token_price(symbol: str) -> float | None:
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
-                    chat_id INTEGER, address TEXT, chain TEXT,
+                    chat_id INTEGER, 
+                    address TEXT, 
+                    chain TEXT,
                     UNIQUE(chat_id, address, chain))""")
     conn.commit()
     conn.close()
 
-def add_wallet(chat_id, address, chain):
+def add_wallet(chat_id: int, address: str, chain: str) -> bool:
     try:
         conn = sqlite3.connect(DB_FILE)
-        conn.execute("INSERT OR IGNORE INTO wallets (chat_id, address, chain) VALUES (?,?,?)", 
-                    (chat_id, address.lower(), chain.upper()))
+        conn.execute("INSERT OR IGNORE INTO wallets (chat_id, address, chain) VALUES (?,?,?)",
+                     (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
     except:
@@ -84,7 +84,7 @@ def add_wallet(chat_id, address, chain):
     finally:
         conn.close()
 
-def get_user_wallets(chat_id):
+def get_user_wallets(chat_id: int):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT DISTINCT address FROM wallets WHERE chat_id=?", (chat_id,))
@@ -92,7 +92,7 @@ def get_user_wallets(chat_id):
     conn.close()
     return result
 
-def get_address_chains(chat_id, address):
+def get_address_chains(chat_id: int, address: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT chain FROM wallets WHERE chat_id=? AND address=?", (chat_id, address))
@@ -145,7 +145,7 @@ async def get_erc20_tokens(address: str, chain: str = "BSC") -> List[Dict]:
         "action": "tokentx",
         "address": address,
         "page": 1,
-        "offset": 80,
+        "offset": 60,
         "sort": "desc"
     }
     
@@ -163,7 +163,7 @@ async def get_erc20_tokens(address: str, chain: str = "BSC") -> List[Dict]:
                 if symbol and contract and symbol not in token_dict:
                     token_dict[symbol] = (contract, decimal)
 
-        for symbol, (contract, decimal) in list(token_dict.items())[:25]:
+        for symbol, (contract, decimal) in list(token_dict.items())[:20]:
             try:
                 bal_params = {
                     "chainid": config["chainid"],
@@ -220,8 +220,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not addrs:
             await query.message.reply_text("暂无保存的钱包")
             return
-        kb = [[InlineKeyboardButton(a[:10]+"...", callback_data=f"addr|{a}")] for a in addrs]
-        await query.message.reply_text("选择要查看的地址：", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton(a[:12]+"...", callback_data=f"addr|{a}")] for a in addrs]
+        await query.message.reply_text("选择地址查看持仓：", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("addr|"):
         addr = data.split("|")[1]
@@ -237,17 +237,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = await get_wallet_tokens(addr, chain)
 
         if not tokens:
-            await query.message.reply_text("⚠️ 该地址暂无 detectable 持仓")
+            await query.message.reply_text("⚠️ 未检测到持仓（可能地址新或无近期交易）")
             return
 
-        msg = f"**{chain} 持仓查询**\n`{addr}`\n\n"
+        msg = f"**{chain} 持仓**\n`{addr}`\n\n"
         total = 0.0
         for t in tokens[:15]:
             price = await get_token_price(t['symbol'])
             usd = t['balance'] * (price or 0)
             total += usd
-            msg += f"• {t['symbol']}: `{t['balance']:.4f}` ≈ ${usd:.2f}\n"
-        msg += f"\n**总价值 ≈ ${total:.2f} USD**"
+            msg += f"• {t['symbol']}: {t['balance']:.4f} ≈ ${usd:.2f}\n"
+        msg += f"\n**总价值 ≈ ${total:.2f}**"
         await query.message.reply_text(msg, parse_mode='Markdown')
 
 
@@ -258,9 +258,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['action'] = 'choosing'
         kb = [[InlineKeyboardButton(c, callback_data=f'addchain|{c}')] for c in ["BSC", "ETH"]]
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif context.user_data.get('action') == 'choosing' and 'addchain' in text:  # 简化处理
-        pass
 
 
 # ====================== 主程序 ======================
@@ -278,7 +275,7 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Bot 异步版本已启动")
+    logger.info("🚀 Bot 已成功启动（异步版本）")
     await application.run_polling(drop_pending_updates=True)
 
 
