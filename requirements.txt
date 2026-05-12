@@ -1,15 +1,9 @@
-# Telegram Bot
+# Telegram Bot 库，异步模式
 python-telegram-bot[asyncio]==20.6
 
-# 异步 HTTP 请求
-httpx==0.24.1
-aiohttp==3.9.5
+# 异步 HTTP 请求，版本和 python-telegram-bot 兼容
+httpx>=0.25.0,<0.26.0
+aiohttp>=3.9.5,<4.0.0
 
 # 环境变量管理
-python-dotenv==1.0.0
-
-# 日志输出（标准库自带，不强制安装，但可选增强库）
-# loguru==0.7.2
-
-# JSON 数据处理
-# 标准库自带 json 模块，不需要额外安装
+python-dotenv>=1.0.0,<2.0.0
