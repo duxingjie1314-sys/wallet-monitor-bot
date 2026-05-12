@@ -103,8 +103,8 @@ def get_wallet_tokens(address, chain="BSC"):
         logger.error(f"查询 {address} 出错: {e}")
     return tokens
 
-# ====================== 核心监控：10% 市值/价格异动 ======================
-async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
+# ====================== 核心监控：10% 市值异动 ======================
+async def monitor_prices(context=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT DISTINCT chat_id, address FROM wallets")
@@ -119,23 +119,23 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 info = get_token_info(symbol)
-                if not info or not info['fdv']:
+                if not info or not info.get('fdv'):
                     continue
 
                 current_price = info['price']
                 current_fdv = info['fdv']
 
-                # 获取历史记录
+                # 获取上次记录
                 c.execute("""SELECT price, fdv FROM price_history 
                            WHERE chat_id=? AND token=? 
                            ORDER BY timestamp DESC LIMIT 1""", (chat_id, symbol))
                 last = c.fetchone()
 
-                if last and last[1]:  # 有历史 FDV
+                if last and last[1]:
                     last_fdv = last[1]
                     change = (current_fdv - last_fdv) / last_fdv * 100 if last_fdv > 0 else 0
 
-                    if abs(change) >= 10:
+                    if abs(change) >= 10:   # 可修改阈值
                         direction = "🚀 **市值大涨**" if change > 0 else "📉 **市值大跌**"
                         msg = f"{direction} **{symbol}**\n" \
                               f"价格: ${current_price:.6f}\n" \
@@ -144,9 +144,12 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                               f"地址: `{address[:8]}...{address[-6:]}`\n" \
                               f"时间: {datetime.now().strftime('%m-%d %H:%M')}"
                         
-                        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                        if context and hasattr(context, 'bot'):
+                            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                        else:
+                            logger.info(f"通知: {symbol} {change:+.1f}%")
 
-                # 保存当前数据
+                # 保存记录
                 c.execute("INSERT INTO price_history (chat_id, token, price, fdv, timestamp) VALUES (?,?,?,?,?)",
                          (chat_id, symbol, current_price, current_fdv, int(time.time())))
             conn.commit()
@@ -155,7 +158,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     
     conn.close()
 
-# ====================== Handlers (你原来的代码) ======================
+# ====================== Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
@@ -232,12 +235,12 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # 启动自动监控（每8分钟检查一次）
+    # 启动自动监控任务
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(monitor_prices, 'interval', minutes=8)
+    scheduler.add_job(monitor_prices, 'interval', minutes=8, args=[None])
     scheduler.start()
 
-    logger.info("🚀 Bot 启动成功 | 10% 市值异动监控已开启")
+    logger.info("🚀 Bot 启动成功 | 10% 市值异动监控已开启（每8分钟）")
     app.run_polling()
 
 if __name__ == '__main__':
