@@ -67,8 +67,7 @@ def add_wallet(chat_id: int, address: str, chain: str) -> bool:
                      (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
-    except Exception as e:
-        logger.error(f"添加失败: {e}")
+    except:
         return False
     finally:
         conn.close()
@@ -90,7 +89,7 @@ def get_address_chains(chat_id: int, address: str):
     return result or ["BSC"]
 
 
-# ====================== 区块链查询（已优化） ======================
+# ====================== 区块链查询 ======================
 def etherscan_request(params: dict):
     if not ETHERSCAN_API_KEY:
         raise Exception("未设置 ETHERSCAN_API_KEY")
@@ -98,7 +97,10 @@ def etherscan_request(params: dict):
     r = httpx.get(BASE_URL, params=params, timeout=20)
     data = r.json()
     if isinstance(data, dict) and data.get("status") == "0":
-        raise Exception(f"API错误: {data.get('result')}")
+        error_msg = data.get('result', '')
+        if "Free API access is not supported" in error_msg:
+            raise Exception("FREE_API_LIMIT")
+        raise Exception(f"API错误: {error_msg}")
     return data
 
 
@@ -109,7 +111,7 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
     if not config:
         return tokens
 
-    # 1. 原生代币
+    # 原生代币
     try:
         data = etherscan_request({
             "chainid": config["chainid"], "module": "account", "action": "balance",
@@ -118,15 +120,14 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
         balance = int(data.get("result", 0)) / 10**18
         if balance > 0.0001:
             tokens.append({"symbol": config["symbol"], "balance": balance})
-            logger.info(f"找到 {config['symbol']}: {balance:.4f}")
     except:
         pass
 
-    # 2. ERC20 代币（优化后）
+    # ERC20 代币
     try:
         data = etherscan_request({
             "chainid": config["chainid"], "module": "account", "action": "tokentx",
-            "address": address, "page": 1, "offset": 100, "sort": "desc"
+            "address": address, "page": 1, "offset": 80, "sort": "desc"
         })
         result = data.get("result", []) if isinstance(data, dict) else []
 
@@ -139,9 +140,7 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
                 if symbol and contract and symbol not in token_dict:
                     token_dict[symbol] = (contract, decimal)
 
-        logger.info(f"发现 {len(token_dict)} 个潜在代币")
-
-        for symbol, (contract, decimal) in list(token_dict.items())[:25]:
+        for symbol, (contract, decimal) in list(token_dict.items())[:20]:
             try:
                 bal = etherscan_request({
                     "chainid": config["chainid"], "module": "account", "action": "tokenbalance",
@@ -150,18 +149,18 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
                 balance = int(bal.get("result", 0)) / (10 ** decimal)
                 if balance > 0.0001:
                     tokens.append({"symbol": symbol, "balance": balance})
-                    logger.info(f"✅ 找到 {symbol} = {balance:.4f}")
             except:
                 continue
     except Exception as e:
-        logger.error(f"tokentx 查询失败: {e}")
+        if "FREE_API_LIMIT" in str(e):
+            logger.warning("免费 API 额度不足")
+        else:
+            logger.error(f"查询失败: {e}")
 
-    if not tokens:
-        logger.warning(f"地址 {address} 未检测到持仓")
     return tokens
 
 
-# ====================== Telegram Handlers ======================
+# ====================== Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
@@ -197,7 +196,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"地址：`{addr}`\n请选择链：", 
                                      reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-    elif data.startswith("chain|"):          # 查看持仓
+    elif data.startswith("chain|"):
         parts = data.split("|")
         chain = parts[1]
         addr = parts[2] if len(parts) > 2 else context.user_data.get('selected_addr')
@@ -207,7 +206,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
         
         if not tokens:
-            await query.message.reply_text("⚠️ 未检测到持仓\n可能该地址近期无交易或持仓极少")
+            await query.message.reply_text("⚠️ 未检测到持仓\n\n可能原因：\n1. 该地址近期无交易\n2. API 免费额度限制\n3. 持仓极少")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
@@ -220,16 +219,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"\n**总价值 ≈ ${total:.2f} USD**"
         await query.message.reply_text(msg, parse_mode='Markdown')
 
-    elif data.startswith("addchain|"):       # 添加钱包
+    elif data.startswith("addchain|"):
         parts = data.split("|")
         chain = parts[1]
         address = parts[2]
-        
         if add_wallet(chat_id, address, chain):
             await query.message.reply_text(f"✅ **添加成功！**\n地址：`{address}`\n链：**{chain}**", parse_mode='Markdown')
             context.user_data.clear()
         else:
-            await query.message.reply_text("❌ 添加失败，请重试")
+            await query.message.reply_text("❌ 添加失败")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,7 +243,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
 
-# ====================== 主程序 ======================
 def main():
     if not BOT_TOKEN:
         logger.error("❌ 未设置 BOT_TOKEN")
@@ -260,7 +257,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Bot 已成功启动（完整优化版）")
+    logger.info("🚀 Bot 已成功启动（完整版）")
     application.run_polling(drop_pending_updates=True)
 
 
