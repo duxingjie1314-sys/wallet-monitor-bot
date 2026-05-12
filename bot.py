@@ -7,7 +7,10 @@ from typing import List, Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 # ====================== 配置 ======================
@@ -17,7 +20,7 @@ MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY")
 
 COINGECKO_COINS = {}
 
-# ====================== CoinGecko ======================
+# ====================== CoinGecko 价格（优化版） ======================
 def load_coingecko_coins():
     global COINGECKO_COINS
     try:
@@ -25,20 +28,30 @@ def load_coingecko_coins():
         if r.status_code == 200:
             COINGECKO_COINS = {coin['symbol'].lower(): coin['id'] for coin in r.json()}
             logger.info(f"✅ CoinGecko 加载 {len(COINGECKO_COINS)} 个币种")
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"CoinGecko 加载失败: {e}")
 
 def get_token_price(symbol: str) -> float | None:
     if not symbol or not COINGECKO_COINS:
         return None
-    coin_id = COINGECKO_COINS.get(symbol.lower())
-    if not coin_id:
-        return None
-    try:
-        r = httpx.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd", timeout=10)
-        return r.json().get(coin_id, {}).get("usd")
-    except:
-        return None
+    
+    s = symbol.lower().strip()
+    variants = [s, s.replace(" ", ""), s.replace("-", ""), s.replace("_", "")]
+    
+    for variant in variants:
+        coin_id = COINGECKO_COINS.get(variant)
+        if coin_id:
+            try:
+                r = httpx.get(
+                    f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd",
+                    timeout=10
+                )
+                price = r.json().get(coin_id, {}).get("usd")
+                if price is not None:
+                    return price
+            except:
+                continue
+    return None
 
 
 # ====================== 数据库 ======================
@@ -94,9 +107,9 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
         url = f"https://deep-index.moralis.io/api/v2.2/{address}/erc20?chain={moralis_chain}"
         headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
         
-        r = httpx.get(url, headers=headers, timeout=20)
+        r = httpx.get(url, headers=headers, timeout=25)
         if r.status_code != 200:
-            logger.error(f"Moralis 错误 {r.status_code}: {r.text[:200]}")
+            logger.error(f"Moralis 返回 {r.status_code}")
             return []
 
         data = r.json()
@@ -111,14 +124,14 @@ def get_wallet_tokens(address: str, chain: str) -> List[Dict]:
                     })
             except:
                 continue
-        logger.info(f"Moralis 查询成功，找到 {len(tokens)} 个代币")
+        logger.info(f"✅ Moralis 查询到 {len(tokens)} 个代币")
         return tokens
     except Exception as e:
         logger.error(f"Moralis 查询异常: {e}")
         return []
 
 
-# ====================== Handlers ======================
+# ====================== Telegram Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
@@ -169,11 +182,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
         total = 0.0
-        for t in tokens[:20]:
+        for t in tokens[:30]:
             price = get_token_price(t['symbol'])
             usd = t['balance'] * (price or 0)
             total += usd
-            msg += f"• {t['symbol']}: {t['balance']:.4f} ≈ ${usd:.2f}\n"
+            
+            if price and price > 0.00001:
+                msg += f"• {t['symbol']}: {t['balance']:.4f} ≈ ${usd:.2f}\n"
+            else:
+                msg += f"• {t['symbol']}: {t['balance']:.4f} (暂无价格)\n"
+        
         msg += f"\n**总价值 ≈ ${total:.2f} USD**"
         await query.message.reply_text(msg, parse_mode='Markdown')
 
@@ -215,7 +233,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Bot 已成功启动（Moralis 版）")
+    logger.info("🚀 Bot 已成功启动（Moralis + 优化价格版）")
     application.run_polling(drop_pending_updates=True)
 
 
