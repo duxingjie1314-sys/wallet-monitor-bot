@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
 MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY")
 
-# ====================== DexScreener 市值 ======================
+# ====================== DexScreener 市值查询 ======================
 def get_market_cap(ca: str):
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{ca}"
@@ -48,8 +48,11 @@ def get_market_cap(ca: str):
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
-                    chat_id INTEGER, address TEXT, chain TEXT,
+                    chat_id INTEGER, 
+                    address TEXT, 
+                    chain TEXT,
                     UNIQUE(chat_id, address, chain))""")
+    
     conn.execute("""CREATE TABLE IF NOT EXISTS price_cache (
                     ca TEXT PRIMARY KEY, 
                     initial_mc REAL, 
@@ -61,8 +64,8 @@ def init_db():
 def add_wallet(chat_id, address, chain):
     try:
         conn = sqlite3.connect(DB_FILE)
-        conn.execute("INSERT OR IGNORE INTO wallets (chat_id, address, chain) VALUES (?,?,?)", 
-                    (chat_id, address.lower(), chain.upper()))
+        conn.execute("INSERT OR IGNORE INTO wallets (chat_id, address, chain) VALUES (?,?,?)",
+                     (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
     except:
@@ -73,33 +76,18 @@ def add_wallet(chat_id, address, chain):
 def get_user_wallets(chat_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT DISTINCT address FROM wallets WHERE chat_id=?", (chat_id,))
-    result = [row[0] for row in c.fetchall()]
+    c.execute("SELECT address, chain FROM wallets WHERE chat_id=?", (chat_id,))
+    result = c.fetchall()
     conn.close()
     return result
 
-def get_address_chains(chat_id, address):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT chain FROM wallets WHERE chat_id=? AND address=?", (chat_id, address))
-    result = [row[0] for row in c.fetchall()]
-    conn.close()
-    return result
-
-# ====================== 持仓查询 ======================
+# ====================== 持仓查询（BSC为主） ======================
 def get_wallet_tokens(address, chain):
     if chain != "BSC" or not BSCSCAN_API_KEY:
         return []
     tokens = []
     try:
-        # BNB 余额
-        url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
-        data = requests.get(url, timeout=10).json()
-        bnb = int(data.get("result", 0)) / 10**18
-        if bnb > 0.0001:
-            tokens.append({"ca": "BNB", "symbol": "BNB"})
-
-        # Token 交易
+        # 获取 Token 交易记录来发现持仓
         url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         seen = set()
@@ -113,7 +101,7 @@ def get_wallet_tokens(address, chain):
         logger.error(f"持仓查询异常: {e}")
     return tokens
 
-# ====================== 核心监控（已修复 await 问题） ======================
+# ====================== 核心监控（每20秒） ======================
 def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -126,7 +114,7 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
             tokens = get_wallet_tokens(address, chain)
             for token in tokens:
                 ca = token.get("ca")
-                if not ca or ca == "BNB":
+                if not ca:
                     continue
 
                 info = get_market_cap(ca)
@@ -135,13 +123,14 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
 
                 current_mc = info["mc"]
 
+                # 查询缓存
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute("SELECT initial_mc FROM price_cache WHERE ca=?", (ca,))
                 row = c.fetchone()
                 conn.close()
 
-                if row is None:
+                if row is None:  # 首次发现
                     conn = sqlite3.connect(DB_FILE)
                     conn.execute("INSERT OR REPLACE INTO price_cache (ca, initial_mc, last_mc, last_time) VALUES (?,?,?,?)",
                                  (ca, current_mc, current_mc, int(time.time())))
@@ -157,23 +146,25 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
                         msg = f"🚀 **相对入场市值上涨 {level}%**！\n\n" \
                               f"代币：**{info['symbol']}**\n" \
                               f"涨幅：**+{total_increase:.1f}%**\n" \
-                              f"初始市值：${initial_mc:,.0f}\n" \
                               f"当前市值：**${current_mc:,.0f}**\n" \
                               f"CA：`{ca}`\n" \
+                              f"链：{chain}\n" \
                               f"地址：`{address[:8]}...{address[-6:]}`\n" \
                               f"时间：{datetime.now().strftime('%H:%M:%S')}"
 
-                        # 异步发送消息（修复 await 错误）
+                        # 异步发送消息
                         if context and context.application:
-                            asyncio.create_task(context.application.bot.send_message(
-                                chat_id=chat_id, 
-                                text=msg, 
-                                parse_mode='Markdown'
-                            ))
+                            asyncio.create_task(
+                                context.application.bot.send_message(
+                                    chat_id=chat_id, 
+                                    text=msg, 
+                                    parse_mode='Markdown'
+                                )
+                            )
                         else:
                             logger.info(f"【提醒】{chat_id} - {info['symbol']} +{total_increase:.1f}%")
 
-                # 更新缓存
+                # 更新最后市值
                 conn = sqlite3.connect(DB_FILE)
                 conn.execute("UPDATE price_cache SET last_mc=?, last_time=? WHERE ca=?",
                              (current_mc, int(time.time()), ca))
@@ -182,51 +173,79 @@ def monitor_prices(context: ContextTypes.DEFAULT_TYPE = None):
         except Exception as e:
             logger.error(f"监控出错 {address}: {e}")
 
-# ====================== Bot Handlers ======================
+# ====================== Bot 交互 ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
-        [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
+        [InlineKeyboardButton("➕ 添加地址", callback_data='add_wallet')],
+        [InlineKeyboardButton("👀 我的地址", callback_data='view_wallets')]
     ]
     await update.message.reply_text(
-        "🚀 **持仓市值监控 Bot**\n\n"
-        "• 每20秒检测一次\n"
+        "🚀 **链上持仓市值监控 Bot**\n\n"
+        "• 每20秒自动检测\n"
         "• 以首次进入市值为基准\n"
-        "• 每涨10%推送提醒", 
-        reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        "• 每涨10%推送提醒",
+        reply_markup=InlineKeyboardMarkup(kb), 
+        parse_mode='Markdown'
     )
 
-# （你的其他按钮处理逻辑保持不变，下面简化处理）
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # ... 保持你原来的按钮逻辑 ...
+    chat_id = query.message.chat.id
+    data = query.data
+
+    if data == 'add_wallet':
+        context.user_data['action'] = 'adding'
+        await query.message.reply_text("请发送钱包地址：")
+
+    elif data == 'view_wallets':
+        wallets = get_user_wallets(chat_id)
+        if not wallets:
+            await query.message.reply_text("暂无监控地址")
+            return
+        text = "**我的监控地址：**\n\n"
+        for addr, ch in wallets:
+            text += f"• `{addr}` ({ch})\n"
+        await query.message.reply_text(text, parse_mode='Markdown')
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding':
-        context.user_data['pending_address'] = update.message.text.strip()
-        context.user_data['action'] = 'choosing'
-        kb = [[InlineKeyboardButton("BSC", callback_data='addchain|BSC')]]
+        address = update.message.text.strip()
+        context.user_data['pending_address'] = address
+        context.user_data['action'] = 'choosing_chain'
+        kb = [[InlineKeyboardButton("BSC", callback_data='chain|BSC')]]
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
+
+async def chain_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chain = query.data.split("|")[1]
+    addr = context.user_data.get('pending_address')
+    if addr and add_wallet(query.message.chat.id, addr, chain):
+        await query.message.reply_text(f"✅ 添加成功！\n{chain} | `{addr}`", parse_mode='Markdown')
+    context.user_data.clear()
 
 # ====================== 启动 ======================
 def main():
     if not BOT_TOKEN:
-        logger.error("缺少 BOT_TOKEN")
+        logger.error("缺少 BOT_TOKEN 环境变量")
         return
+
     init_db()
-    
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # 启动定时任务
     scheduler = BackgroundScheduler()
     scheduler.add_job(monitor_prices, 'interval', seconds=20, args=[None])
     scheduler.start()
-    logger.info("✅ 20秒监控任务已启动")
+    logger.info("✅ 市值监控任务已启动（每20秒）")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(chain_callback, pattern="^chain\\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
+
     logger.info("🚀 Bot 已启动")
     app.run_polling()
 
