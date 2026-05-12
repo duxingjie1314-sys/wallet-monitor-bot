@@ -80,53 +80,54 @@ def get_token_info(symbol: str):
         pass
     return None
 
-# ====================== 获取钱包 Token ======================
+# ====================== 获取钱包 Token（最终修复版） ======================
 def get_wallet_tokens(address, chain="BSC"):
     if chain != "BSC" or not BSCSCAN_API_KEY:
-        return [{"symbol": "API_KEY_MISSING"}]
+        return [{"symbol": "BSCSCAN_API_KEY_MISSING"}]
     
     tokens = []
-    address = address.lower()
+    address = address.lower().strip()
     
     try:
-        # === 查询 BNB 余额 ===
+        # 1. 查询 BNB 余额
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
+        data = requests.get(url, timeout=12).json()
         
-        logger.info(f"BNB 查询结果: {data}")   # ← 打印日志方便调试
-        
+        status = data.get("status")
         result = data.get("result")
-        if isinstance(result, str) and result.isdigit():
+        
+        if status == "1" and isinstance(result, str) and result.isdigit():
             bnb = int(result) / 10**18
-            if bnb > 0.00005:   # 降低阈值
-                tokens.append({"symbol": "BNB", "balance": bnb})
+            if bnb >= 0.00005:
+                tokens.append({"symbol": "BNB", "balance": round(bnb, 4)})
         else:
-            logger.warning(f"BNB 返回异常: {result}")
+            logger.warning(f"BNB 查询失败 | Status: {status} | Result: {result}")
             
     except Exception as e:
         logger.error(f"BNB 查询异常: {e}")
 
     try:
-        # === 通过交易记录发现 Token ===
+        # 2. 通过交易记录发现 Token（更稳健）
         url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=100&sort=desc&apikey={BSCSCAN_API_KEY}"
-        resp = requests.get(url, timeout=12)
-        data = resp.json()
+        data = requests.get(url, timeout=12).json()
         
-        logger.info(f"TokenTx 返回状态: {data.get('status')} 结果数量: {len(data.get('result', []))}")
-        
-        seen = set()
-        for tx in data.get("result", []):
-            symbol = tx.get("tokenSymbol")
-            if symbol and symbol not in seen:
-                seen.add(symbol)
-                tokens.append({"symbol": symbol, "balance": 0})
+        if data.get("status") == "1":
+            seen = set()
+            for tx in data.get("result", []):
+                symbol = tx.get("tokenSymbol")
+                if symbol and symbol not in seen and symbol.strip():
+                    seen.add(symbol)
+                    tokens.append({"symbol": symbol, "balance": 0})
+        else:
+            logger.warning(f"TokenTx 查询失败: {data.get('message')}")
+            
     except Exception as e:
         logger.error(f"TokenTx 查询异常: {e}")
 
+    # 如果什么都没查到，给提示
     if not tokens:
-        tokens.append({"symbol": "NO_ASSETS_FOUND"})
-        
+        tokens.append({"symbol": "NO_ASSETS_OR_API_LIMIT"})
+
     return tokens
 # ====================== 监控函数 ======================
 def monitor_prices():
