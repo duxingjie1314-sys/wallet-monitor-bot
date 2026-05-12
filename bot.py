@@ -86,14 +86,23 @@ def get_wallet_tokens(address, chain="BSC"):
         return []
     tokens = []
     try:
-        # BNB
+        # BNB 余额（加强错误处理）
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=10).json()
-        bnb = int(data.get("result", 0)) / 10**18
-        if bnb > 0.0001:
-            tokens.append({"symbol": "BNB", "balance": bnb})
+        
+        result = data.get("result")
+        if isinstance(result, str) and result.isdigit():
+            bnb = int(result) / 10**18
+            if bnb > 0.0001:
+                tokens.append({"symbol": "BNB", "balance": bnb})
+        else:
+            logger.warning(f"BNB 查询返回异常: {result}")
+            
+    except Exception as e:
+        logger.error(f"BNB 查询出错: {e}")
 
-        # Token tx
+    try:
+        # Token tx 发现
         url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
         data = requests.get(url, timeout=12).json()
         seen = set()
@@ -103,9 +112,9 @@ def get_wallet_tokens(address, chain="BSC"):
                 seen.add(symbol)
                 tokens.append({"symbol": symbol, "balance": 0})
     except Exception as e:
-        logger.error(f"查询出错: {e}")
+        logger.error(f"Token tx 查询出错: {e}")
+    
     return tokens
-
 # ====================== 监控函数 ======================
 def monitor_prices():
     conn = sqlite3.connect(DB_FILE)
