@@ -12,21 +12,13 @@ from telegram.ext import (
     filters
 )
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DB_FILE = "database.db"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY")
 ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY")
-
-SUPPORTED_CHAINS = {
-    "BSC": {"api": "https://api.bscscan.com/api", "key": BSCSCAN_API_KEY},
-    "ETH": {"api": "https://api.etherscan.io/api", "key": ETHERSCAN_API_KEY},
-}
 
 # ====================== 数据库 ======================
 def init_db():
@@ -40,10 +32,8 @@ def init_db():
 def add_wallet(chat_id, address, chain):
     try:
         conn = sqlite3.connect(DB_FILE)
-        conn.execute(
-            "INSERT INTO wallets (chat_id, address, chain) VALUES (?,?,?)",
-            (chat_id, address.lower(), chain.upper())
-        )
+        conn.execute("INSERT INTO wallets (chat_id, address, chain) VALUES (?,?,?)", 
+                    (chat_id, address.lower(), chain.upper()))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -67,84 +57,59 @@ def get_address_chains(chat_id, address):
     conn.close()
     return result
 
-# ====================== 异步 HTTP ======================
-async def fetch_json(session, url, params=None):
-    try:
-        async with session.get(url, params=params, timeout=12) as resp:
-            return await resp.json()
-    except Exception as e:
-        logger.error(f"HTTP 请求失败 {url} : {e}")
-        return {}
-
-# ====================== 查询钱包 ======================
+# ====================== 异步查询 ======================
 async def get_wallet_tokens(address, chain):
-    chain = chain.upper()
-    if chain not in SUPPORTED_CHAINS:
-        return []
-
-    api_info = SUPPORTED_CHAINS[chain]
-    if not api_info['key']:
-        logger.warning(f"{chain} API Key 未设置")
-        return []
-
     tokens = []
-
-    params_balance = {
-        "module": "account",
-        "action": "balance",
-        "address": address,
-        "apikey": api_info['key']
-    }
-
-    params_token = {
-        "module": "account",
-        "action": "tokentx",
-        "address": address,
-        "page": 1,
-        "offset": 150,
-        "sort": "desc",
-        "apikey": api_info['key']
-    }
-
     async with aiohttp.ClientSession() as session:
-        # 查询主币余额
-        data = await fetch_json(session, api_info['api'], params=params_balance)
-        if data.get("status") == "1" and "result" in data:
-            try:
-                balance = int(data["result"]) / 10**18
-                symbol = {"BSC": "BNB", "ETH": "ETH"}.get(chain, "NATIVE")
-                if balance > 0.0001:
-                    tokens.append({"symbol": symbol, "balance": balance})
-            except ValueError:
-                logger.error(f"{chain} 主币余额转换异常: {data['result']}")
-        else:
-            logger.warning(f"{chain} 查询主币余额失败: {data}")
+        try:
+            if chain == "BSC" and BSCSCAN_API_KEY:
+                # BNB 主币余额 V2
+                url = f"https://api.bscscan.com/api/v2/account/balance?address={address}&apikey={BSCSCAN_API_KEY}"
+                async with session.get(url, timeout=10) as resp:
+                    data = await resp.json()
+                    bnb = int(data.get("result", 0)) / 10**18
+                    if bnb > 0.0001:
+                        tokens.append({"symbol": "BNB", "balance": bnb})
 
-        # 查询 ERC20 token 交易记录
-        data = await fetch_json(session, api_info['api'], params=params_token)
-        if data.get("status") == "1" and "result" in data:
-            result = data["result"]
-            seen = set()
-            for tx in result:
-                sym = tx.get("tokenSymbol")
-                if sym and sym not in seen:
-                    seen.add(sym)
-                    tokens.append({"symbol": sym, "balance": 0})
-            logger.info(f"[{chain}] {address} 发现 {len(tokens)} 个资产")
-        else:
-            logger.warning(f"{chain} 查询 ERC20 token 失败: {data}")
+                # BSC Token 交易 V2
+                url = f"https://api.bscscan.com/api/v2/account/token-transfers?address={address}&page=1&offset=150&sort=desc&apikey={BSCSCAN_API_KEY}"
+                async with session.get(url, timeout=12) as resp:
+                    data = await resp.json()
+                    result = data.get("result", [])
+                    logger.info(f"tokentx 返回 {len(result)} 条记录")
+                    seen = set()
+                    for tx in result:
+                        symbol = tx.get("tokenSymbol")
+                        if symbol and symbol not in seen:
+                            seen.add(symbol)
+                            tokens.append({"symbol": symbol, "balance": 0})
+                            logger.info(f"发现 Token: {symbol}")
 
+            elif chain == "ETH" and ETHERSCAN_API_KEY:
+                # ETH 主币余额
+                url = f"https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
+                async with session.get(url, timeout=10) as resp:
+                    data = await resp.json()
+                    eth = int(data.get("result", 0)) / 10**18
+                    if eth > 0.0001:
+                        tokens.append({"symbol": "ETH", "balance": eth})
+                # ETH Token 查询可同理，这里暂略
+
+        except Exception as e:
+            logger.error(f"{chain} 查询失败: {e}")
+
+    logger.info(f"{chain} 最终发现 {len(tokens)} 个资产")
     return tokens
 
-# ====================== Bot Handlers ======================
+# ====================== Handlers ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 清除 webhook 避免冲突
+    await context.bot.delete_webhook()
     kb = [
         [InlineKeyboardButton("➕ 添加钱包", callback_data='add_wallet')],
         [InlineKeyboardButton("👀 查看我的钱包", callback_data='view_wallet')]
     ]
-    await update.message.reply_text("🎉 **钱包监控 Bot**",
-                                    reply_markup=InlineKeyboardMarkup(kb),
-                                    parse_mode='Markdown')
+    await update.message.reply_text("🎉 **钱包监控 Bot**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -169,9 +134,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['selected'] = addr
         chains = get_address_chains(chat_id, addr)
         kb = [[InlineKeyboardButton(c, callback_data=f"chain|{c}")] for c in chains]
-        await query.message.reply_text(f"地址：`{addr}`\n选择链：",
-                                       reply_markup=InlineKeyboardMarkup(kb),
-                                       parse_mode='Markdown')
+        await query.message.reply_text(f"地址：`{addr}`\n选择链：", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("chain|"):
         chain = data.split("|")[1]
@@ -201,7 +164,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'adding':
         context.user_data['pending_address'] = update.message.text.strip()
         context.user_data['action'] = 'choosing'
-        kb = [[InlineKeyboardButton(c, callback_data=f'addchain|{c}')] for c in SUPPORTED_CHAINS.keys()]
+        kb = [[InlineKeyboardButton("BSC", callback_data='addchain|BSC')],
+              [InlineKeyboardButton("ETH", callback_data='addchain|ETH')]]
         await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
 
 # ====================== 主函数 ======================
