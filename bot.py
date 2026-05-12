@@ -210,7 +210,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"地址：`{addr}`\n请选择链：", 
                                      reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-    elif data.startswith("chain|"):
+    elif data.startswith("chain|"):   # 查看持仓
         parts = data.split("|")
         chain = parts[1]
         addr = parts[2] if len(parts) > 2 else context.user_data.get('selected_addr')
@@ -220,7 +220,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens = get_wallet_tokens(addr, chain)
         
         if not tokens:
-            await query.message.reply_text("⚠️ 未检测到持仓（可能地址较新或无交易记录）")
+            await query.message.reply_text("⚠️ 未检测到持仓（可能地址较新或近期无交易）")
             return
 
         msg = f"**{chain} 持仓**\n`{addr}`\n\n"
@@ -233,20 +233,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"\n**总价值 ≈ ${total:.2f} USD**"
         await query.message.reply_text(msg, parse_mode='Markdown')
 
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if context.user_data.get('action') == 'adding':
-        address = text
-        context.user_data['pending_address'] = address
-        context.user_data['action'] = 'choosing'
+    elif data.startswith("addchain|"):   # ← 新增：处理添加钱包
+        parts = data.split("|")
+        chain = parts[1]
+        address = parts[2]
         
-        kb = [
-            [InlineKeyboardButton("BSC", callback_data=f"addchain|BSC|{address}")],
-            [InlineKeyboardButton("ETH", callback_data=f"addchain|ETH|{address}")]
-        ]
-        await update.message.reply_text("请选择链：", reply_markup=InlineKeyboardMarkup(kb))
-
+        if add_wallet(chat_id, address, chain):
+            await query.message.reply_text(f"✅ 添加成功！\n\n地址：`{address}`\n链：**{chain}**", parse_mode='Markdown')
+            # 清空状态
+            context.user_data.pop('action', None)
+            context.user_data.pop('pending_address', None)
+        else:
+            await query.message.reply_text("❌ 添加失败，请重试")
 
 # ====================== 主程序 ======================
 def main():
